@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"os"
 	"os/signal"
 	"time"
@@ -11,77 +10,66 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/dynamic/dynamicinformer"
-	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/clientcmd"
 )
 
+type InformerInfo struct {
+	shortName   string
+	stopChannel chan struct{}
+	informer    cache.SharedIndexInformer
+}
+
 func main() {
-	cfg, err := restConfig()
+	cfg, err := clientcmd.BuildConfigFromFlags("", os.Getenv("KUBECONFIG"))
 	if err != nil {
 		logrus.WithError(err).Fatal("could not get config")
 	}
 
-	// Grab a dynamic interface that we can create informers from
-	dc, err := dynamic.NewForConfig(cfg)
+	client, err := dynamic.NewForConfig(cfg)
 	if err != nil {
 		logrus.WithError(err).Fatal("could not generate dynamic client for config")
 	}
 
-	// Create a factory object that we can say "hey, I need to watch this resource"
-	// and it will give us back an informer for it
-	f := dynamicinformer.NewFilteredDynamicSharedInformerFactory(dc, 0, "pn", nil)
-	// f := dynamicinformer.NewFilteredDynamicSharedInformerFactory(dc, 0, v1.NamespaceAll, nil)
+	informerFactory := dynamicinformer.NewFilteredDynamicSharedInformerFactory(client, 0, "pn", nil)
+	// informerFactory := dynamicinformer.NewFilteredDynamicSharedInformerFactory(dc, 0, v1.NamespaceAll, nil)
 
-	gvr := &schema.GroupVersionResource{
-		Group:    "",
-		Version:  "v1",
-		Resource: "configmaps",
-	}
+	handler := createHandler()
 
-	// Finally, create our informer for deployments!
-	i := f.ForResource(*gvr)
+	informerInfos := []InformerInfo{}
+	informerInfos = append(informerInfos, startWatching(informerFactory, "secrets", schema.GroupVersionResource{Version: "v1", Resource: "secrets"}, handler))
+	informerInfos = append(informerInfos, startWatching(informerFactory, "cms", schema.GroupVersionResource{Version: "v1", Resource: "configmaps"}, handler))
 
-	stopCh := make(chan struct{})
-	go startWatching(stopCh, i.Informer())
-
-	sigCh := make(chan os.Signal, 0)
-	signal.Notify(sigCh, os.Kill, os.Interrupt)
+	signalChannel := make(chan os.Signal, 1)
+	signal.Notify(signalChannel, os.Interrupt)
 
 	ticker := time.NewTicker(1 * time.Second)
-	done := make(chan bool)
+	stopTicker := make(chan bool)
 	go func() {
 		for {
 			select {
-			case <-done:
+			case <-stopTicker:
 				return
-			case t := <-ticker.C:
-				list := i.Informer().GetStore().List()
-				fmt.Println("Tick at", t, "with", len(list), "configmaps")
+			case <-ticker.C:
+				fields := logrus.Fields{}
+				for _, informerInfo := range informerInfos {
+					list := informerInfo.informer.GetStore().List()
+					fields[informerInfo.shortName] = len(list)
+				}
+				logrus.WithFields(fields).Info("Checking caches")
 			}
 		}
 	}()
 
-	<-sigCh
-	close(stopCh)
-	done <- true
+	<-signalChannel
+	for _, informerInfo := range informerInfos {
+		close(informerInfo.stopChannel)
+	}
+	stopTicker <- true
 }
 
-func restConfig() (*rest.Config, error) {
-	kubeCfg, err := rest.InClusterConfig()
-	if kubeconfig := os.Getenv("KUBECONFIG"); kubeconfig != "" {
-		kubeCfg, err = clientcmd.BuildConfigFromFlags("", kubeconfig)
-	}
-
-	if err != nil {
-		return nil, err
-	}
-
-	return kubeCfg, nil
-}
-
-func startWatching(stopCh <-chan struct{}, s cache.SharedIndexInformer) {
-	handlers := cache.ResourceEventHandlerFuncs{
+func createHandler() (handler cache.ResourceEventHandlerFuncs) {
+	handler = cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
 			u := obj.(*unstructured.Unstructured)
 			logrus.WithFields(logrus.Fields{
@@ -107,7 +95,14 @@ func startWatching(stopCh <-chan struct{}, s cache.SharedIndexInformer) {
 			}).Info("received delete event!")
 		},
 	}
+	return
+}
 
-	s.AddEventHandler(handlers)
-	s.Run(stopCh)
+func startWatching(informerFactory dynamicinformer.DynamicSharedInformerFactory, shortName string, gvr schema.GroupVersionResource, handler cache.ResourceEventHandlerFuncs) (informerInfo InformerInfo) {
+	informerInfo.shortName = shortName
+	informerInfo.informer = informerFactory.ForResource(gvr).Informer()
+	informerInfo.stopChannel = make(chan struct{})
+	informerInfo.informer.AddEventHandler(handler)
+	go informerInfo.informer.Run(informerInfo.stopChannel)
+	return
 }
