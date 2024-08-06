@@ -1,11 +1,12 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"os/signal"
+	"time"
 
 	"github.com/sirupsen/logrus"
-	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
@@ -29,7 +30,8 @@ func main() {
 
 	// Create a factory object that we can say "hey, I need to watch this resource"
 	// and it will give us back an informer for it
-	f := dynamicinformer.NewFilteredDynamicSharedInformerFactory(dc, 0, v1.NamespaceAll, nil)
+	f := dynamicinformer.NewFilteredDynamicSharedInformerFactory(dc, 0, "pn", nil)
+	// f := dynamicinformer.NewFilteredDynamicSharedInformerFactory(dc, 0, v1.NamespaceAll, nil)
 
 	gvr := &schema.GroupVersionResource{
 		Group:    "",
@@ -46,8 +48,23 @@ func main() {
 	sigCh := make(chan os.Signal, 0)
 	signal.Notify(sigCh, os.Kill, os.Interrupt)
 
+	ticker := time.NewTicker(1 * time.Second)
+	done := make(chan bool)
+	go func() {
+		for {
+			select {
+			case <-done:
+				return
+			case t := <-ticker.C:
+				list := i.Informer().GetStore().List()
+				fmt.Println("Tick at", t, "with", len(list), "configmaps")
+			}
+		}
+	}()
+
 	<-sigCh
 	close(stopCh)
+	done <- true
 }
 
 func restConfig() (*rest.Config, error) {
