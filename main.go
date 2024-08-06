@@ -6,6 +6,7 @@ import (
 
 	"github.com/sirupsen/logrus"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/dynamic/dynamicinformer"
@@ -30,8 +31,11 @@ func main() {
 	// and it will give us back an informer for it
 	f := dynamicinformer.NewFilteredDynamicSharedInformerFactory(dc, 0, v1.NamespaceAll, nil)
 
-	// Retrieve a "GroupVersionResource" type that we need when generating our informer from our dynamic factory
-	gvr, _ := schema.ParseResourceArg("deployments.v1.apps")
+	gvr := &schema.GroupVersionResource{
+		Group:    "",
+		Version:  "v1",
+		Resource: "configmaps",
+	}
 
 	// Finally, create our informer for deployments!
 	i := f.ForResource(*gvr)
@@ -62,13 +66,28 @@ func restConfig() (*rest.Config, error) {
 func startWatching(stopCh <-chan struct{}, s cache.SharedIndexInformer) {
 	handlers := cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
-			logrus.Info("received add event!")
+			u := obj.(*unstructured.Unstructured)
+			logrus.WithFields(logrus.Fields{
+				"kind":      u.GetKind(),
+				"name":      u.GetName(),
+				"namespace": u.GetNamespace(),
+			}).Info("received add event!")
 		},
 		UpdateFunc: func(oldObj, obj interface{}) {
-			logrus.Info("received update event!")
+			u := obj.(*unstructured.Unstructured)
+			logrus.WithFields(logrus.Fields{
+				"kind":      u.GetKind(),
+				"name":      u.GetName(),
+				"namespace": u.GetNamespace(),
+			}).Info("received update event!")
 		},
 		DeleteFunc: func(obj interface{}) {
-			logrus.Info("received update event!")
+			u := obj.(*unstructured.Unstructured)
+			logrus.WithFields(logrus.Fields{
+				"kind":      u.GetKind(),
+				"name":      u.GetName(),
+				"namespace": u.GetNamespace(),
+			}).Info("received delete event!")
 		},
 	}
 
